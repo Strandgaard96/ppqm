@@ -308,6 +308,47 @@ def read_atoms(lines: List[str]) -> int:
     n_atoms = len(atoms)
     return n_atoms
 
+def parse_thermo_table(lines: List[str]) -> dict:
+    """Parse the summary table from xtb log"""
+
+    properties = dict()
+
+    for line in lines:
+
+        if ":::" in line:
+            continue
+
+        if "..." in line:
+            continue
+        if "########" in line:
+            continue
+
+        # Needs a loop break when the Hessian is computed.
+        if "Hessian" in line:
+            break
+
+        line_ = (
+            line.replace("w/o", "without")
+            .replace(":", "")
+            .replace("|", "")
+            .replace("->", "")
+            .replace("/", "_")
+            .strip()
+        ).split()
+
+        if len(line_) < 2:
+            continue
+
+        value = float(line_[-2])
+        # unit = line[-1]
+        name_ = line_[:-2]
+        name = "_".join(name_).lower()
+        name = name.replace("-", "_").replace(".", "")
+
+        properties[name] = float(value)
+
+    return properties
+
 
 def parse_sum_table(lines: List[str]) -> dict:
     """Parse the summary table from xtb log"""
@@ -359,7 +400,6 @@ def read_properties(
 
     if options is None:
         reader = read_properties_opt
-
     elif "vfukui" in options:
         reader = read_properties_fukui
         read_files = False
@@ -369,7 +409,7 @@ def read_properties(
         read_files = False
 
     elif "opt" in options or "ohess" in options:
-        reader = read_properties_opt
+        reader = read_properties_hess
 
     if reader is None:
         reader = read_properties_sp
@@ -400,6 +440,114 @@ def read_properties(
 
         if "vibspectrum" in files:
             properties["frequencies"] = get_frequencies(scr=scr)
+
+    return properties
+
+def read_properties_hess(lines: List[str]) -> Optional[dict]:
+    """
+    TODO read dipole moment
+    TODO Inlcude units in docstring
+    TODO GEOMETRY OPTIMIZATION CONVERGED AFTER 48 ITERATIONS
+
+    electornic_energy is SCC energy
+
+    """
+
+    # TODO Better logging for crashed xtb
+    if not read_status(lines):
+        return None
+
+    keywords = [
+        "final structure:",
+        "::                     SUMMARY                     ::",
+        "Property Printout  ",
+        "::                  THERMODYNAMIC",
+        "| HOMO-LUMO GAP",
+    ]
+
+    stoppattern = "CYCLE    "
+    idxs = linesio.get_rev_indices_patterns(lines, keywords, stoppattern=stoppattern)
+
+    assert idxs[1] is not None, "Uncaught xtb exception. Please report."
+    assert idxs[2] is not None, "Uncaught xtb exception. Please report."
+
+    idxs[0]
+    idx_summary = idxs[1]
+    idx_end_summary = idxs[2]
+
+    idx_thermo = idxs[3]
+    idx_end_thermo = idxs[4]
+
+    # Get atom count
+    # keyword = "number of atoms"
+    # idx = linesio.get_index(lines, keyword)
+    # assert idx is not None, "Uncaught xtb exception. Should not happen"
+    # line = lines[idx]
+    # n_atoms_ = line.split()[-1]
+    # n_atoms = int(n_atoms_)
+    #n_atoms = read_atoms(lines)
+
+    # Get energies
+    idx_summary = idxs[1] + 1
+
+    # :: total energy        +1
+    # :: total w/o Gsasa/hb  +2
+    # :: gradient norm       +3
+    # :: HOMO-LUMO gap       +4
+    # ::.....................+4
+    # :: SCC energy          +5
+    # :: -> isotropic ES     +6
+    # :: -> anisotropic ES   +7
+    # :: -> anisotropic XC   +8
+    # :: -> dispersion       +9
+    # :: -> Gsolv            +10
+    # ::    -> Gborn         +11
+    # ::    -> Gsasa         +12
+    # ::    -> Ghb           +13
+    # ::    -> Gshift        +14
+    # :: repulsion energy    +15
+    # :: add. restraining    +16
+
+    prop_lines = lines[idx_summary : idx_end_summary - 2]
+    prop_dict = parse_sum_table(prop_lines)
+
+    thermo_lines = lines[idx_thermo: idx_end_thermo+1]
+    thermo_dict = parse_thermo_table(thermo_lines)
+
+
+    # total_energy = prop_dict.get("total_energy", float("nan"))
+    # gsolv = prop_dict.get("gsolv", float("nan"))
+    # electronic_energy = prop_dict.get("scc_energy", float("nan"))
+
+    properties = {**prop_dict, **thermo_dict}
+
+
+    # Get dipole
+    dipole_str = "molecular dipole:"
+    idx = linesio.get_rev_index(lines, dipole_str)
+    if idx is None:
+        dipole_tot = None
+    else:
+        idx += 3
+        line = lines[idx]
+        line_ = line.split()
+        dipole_tot = float(line_[-1])
+
+    properties = {
+        COLUMN_DIPOLE: dipole_tot,
+        "n_atoms": 0,
+        **properties,
+    }
+
+    # Get covalent properties
+    properties_covalent = read_covalent_coordination(lines)
+    if properties_covalent is not None:
+        properties = {**properties, **properties_covalent}
+
+    # Get orbitals
+    properties_orbitals = read_properties_orbitals(lines)
+    if properties_orbitals is not None:
+        properties = {**properties, **properties_orbitals}
 
     return properties
 
@@ -441,7 +589,7 @@ def read_properties_sp(lines: List[str]) -> Optional[dict]:
     # line = lines[idx]
     # n_atoms_ = line.split()[-1]
     # n_atoms = int(n_atoms_)
-    n_atoms = read_atoms(lines)
+    #n_atoms = read_atoms(lines)
 
     # Get energies
     idx_summary = idxs[1] + 1
@@ -486,7 +634,7 @@ def read_properties_sp(lines: List[str]) -> Optional[dict]:
 
     properties = {
         COLUMN_DIPOLE: dipole_tot,
-        "n_atoms": n_atoms,
+        "n_atoms": 0,
         **properties,
     }
 
@@ -598,6 +746,7 @@ def read_properties_opt(lines: List[str]) -> Optional[dict]:
     }
 
     return properties
+
 
 
 def read_properties_omega(lines: List[str]) -> Optional[dict]:
